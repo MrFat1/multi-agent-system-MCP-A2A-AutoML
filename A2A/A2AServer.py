@@ -20,7 +20,6 @@ Hereda de esta clase para crear nuevos agentes.
 #  3. Llama a run()
 # ===============================================================================
 
-import logging
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -44,7 +43,8 @@ from a2a.types import (
     TextPart
 )
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 
 class A2AServer(ABC):

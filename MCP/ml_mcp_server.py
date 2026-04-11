@@ -28,6 +28,7 @@ Uso:
 from __future__ import annotations
 
 import json
+import sys
 import uuid
 import warnings
 from datetime import datetime
@@ -54,13 +55,14 @@ from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
 
 warnings.filterwarnings("ignore")
 
-import logging
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 import uvicorn
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Servidor
@@ -620,6 +622,6 @@ def log_run(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    logging.info("Starting ML MCP server at port 9002...")
+    logger.info("Starting ML MCP server at port 9002...")
     #mcp.run(transport="sse", port=9002)
     uvicorn.run(mcp.sse_app(), host="localhost", port=9002)

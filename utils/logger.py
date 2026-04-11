@@ -1,4 +1,7 @@
 import logging
+import os
+
+AGENT_LOGGER_NAME = "agents"
 
 class Logger:
     def __init__(self, project_name, logs_pathname):
@@ -46,3 +49,50 @@ class Logger:
             self.logger.addHandler(file_handler)
 
         return self.logger
+    
+_loggers: dict = {}  # cache para evitar duplicados
+
+def get_logger(name: str, log_file: str = "outputs/logs/ml_pipeline.log") -> logging.Logger:
+    """
+    Devuelve un logger configurado. Si ya existe uno con ese nombre, lo reutiliza.
+    Crea el directorio de logs si no existe.
+    """
+    if name in _loggers:
+        return _loggers[name]
+    
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    logger = Logger(name, log_file).launch_logging()
+    _loggers[name] = logger
+    return logger
+
+def get_agent_logger(log_file: str = "outputs/logs/agents.log") -> logging.Logger:
+    """
+    Logger dedicado a las respuestas y razonamientos de los agentes.
+    Escribe en agents.log (además de consola) para separar la traza
+    del LLM de los logs de infraestructura.
+    """
+    if AGENT_LOGGER_NAME in _loggers:
+        return _loggers[AGENT_LOGGER_NAME]
+
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+    agent_logger = logging.getLogger(AGENT_LOGGER_NAME)
+    agent_logger.setLevel(logging.DEBUG)
+
+    # Solo fichero — las respuestas de los agentes no necesitan salir por consola
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s\n%(message)s\n' + '-' * 80
+    )
+    file_handler.setFormatter(formatter)
+
+    if not agent_logger.handlers:
+        agent_logger.addHandler(file_handler)
+
+    # Evitar que suba al root logger (que lo mandaría también a consola)
+    agent_logger.propagate = False
+
+    _loggers[AGENT_LOGGER_NAME] = agent_logger
+    return agent_logger

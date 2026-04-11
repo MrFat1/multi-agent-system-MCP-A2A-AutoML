@@ -20,3 +20,10 @@ __pycache__/
 .venv/
 venv/
 env/
+
+# ----------------------
+# Folders
+# ----------------------
+models/
+outputs/
+data/splits/

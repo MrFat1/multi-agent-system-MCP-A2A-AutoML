@@ -18,6 +18,7 @@ Uso:
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
@@ -41,13 +42,14 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-import logging
 import uvicorn
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Servidor
@@ -624,6 +626,6 @@ def generate_report(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    logging.info("Starting Eval MCP server at port 9003...")
+    logger.info("Starting Eval MCP server at port 9003...")
     #mcp.run(transport="sse", port=9003)
     uvicorn.run(mcp.sse_app(), host="localhost", port=9003)

@@ -17,19 +17,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
 import multiprocessing
 import sys
 import time
 from typing import Optional
+from pathlib import Path
 
 import httpx
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("main")
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 # ─────────────────────────────────────────────────────────
 # Configuración de puertos
@@ -90,12 +87,12 @@ async def check_mcp_servers() -> bool:
             try:
                 resp = await client.get(url)
                 # Cualquier respuesta HTTP (200, 404, 405...) significa que el servidor está vivo
-                logger.info(f"  ✓ {name} disponible (status {resp.status_code})")
+                logger.info(f"  {name} disponible (status {resp.status_code})")
             except httpx.ConnectError:
-                logger.error(f"  ✗ {name} no disponible en {url} — ¿está arrancado?")
+                logger.error(f"  {name} no disponible en {url} — ¿está arrancado?")
                 all_ok = False
             except Exception as e:
-                logger.error(f"  ✗ {name} error inesperado: {e}")
+                logger.error(f"  {name} error inesperado: {e}")
                 all_ok = False
 
     if not all_ok:
@@ -121,7 +118,7 @@ async def wait_for_agents(timeout: float = 30.0) -> bool:
                     logger.info(f"Probando conexión con {name} en la url: {url}")
                     resp = await client.get(url)
                     if resp.status_code == 200:
-                        logger.info(f"  ✓ {name} listo")
+                        logger.info(f" {name} listo")
                         ready.append(name)
                 except Exception:
                     pass
@@ -205,6 +202,14 @@ async def run_pipeline(dataset_path: str) -> str:
 
 async def main(dataset_path: Optional[str], serve_only: bool):
 
+    path = Path(dataset_path)
+    if not path.exists():
+        raise PipelineError("main", f"El archivo no existe: {dataset_path}")
+    if not path.is_file():
+        raise PipelineError("main", f"La ruta no apunta a un archivo: {dataset_path}")
+    if path.suffix.lower() not in (".csv", ".parquet", ".json", ".jsonl", ".xlsx", ".xls", ".feather", ".orc"):
+        raise PipelineError("main", f"Formato no soportado: '{path.suffix}'. Usa CSV")
+
     # Verificar MCP servers primero
     mcp_ok = await check_mcp_servers()
     if not mcp_ok:
@@ -216,7 +221,7 @@ async def main(dataset_path: Optional[str], serve_only: bool):
 
     # Esperar a que estén listos
     logger.info("Esperando a que los agentes estén disponibles...")
-    ready = await wait_for_agents(timeout=60.0)
+    ready = await wait_for_agents(timeout=120.0)
     if not ready:
         logger.error("No se pudieron arrancar todos los agentes. Abortando.")
         for p in processes:

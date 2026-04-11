@@ -16,7 +16,8 @@ que tiene suficiente información para responder.
 
 from __future__ import annotations
 
-import logging
+import json
+
 from abc import abstractmethod
 from typing import Any
 
@@ -30,7 +31,9 @@ from google.genai import types as genai_types
 from A2A.A2AServer import A2AServer
 from a2a.types import AgentCard
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger, get_agent_logger
+logger = get_logger(__name__)
+agent_logger = get_agent_logger()
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -148,6 +151,31 @@ class BaseMLAgent(A2AServer):
             session_id=session.id,
             new_message=user_content,
         ):
+            
+            # ── Log de tool calls y respuestas ──────────────────────────
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+
+                    # El agente decide llamar a una tool
+                    if hasattr(part, "function_call") and part.function_call:
+                        fc = part.function_call
+                        agent_logger.info(
+                            f"AGENT: {self.agent_name}\n"
+                            f"TOOL CALL: {fc.name}\n"
+                            f"PARAMS:\n{json.dumps(dict(fc.args), indent=2, ensure_ascii=False, default=str)}"
+                        )
+
+                    # La tool devuelve su respuesta
+                    elif hasattr(part, "function_response") and part.function_response:
+                        fr = part.function_response
+                        response_str = json.dumps(
+                            fr.response, indent=2, ensure_ascii=False, default=str
+                        ) if isinstance(fr.response, dict) else str(fr.response)
+                        agent_logger.info(
+                            f"AGENT: {self.agent_name}\n"
+                            f"TOOL RESPONSE: {fr.name}\n"
+                            f"RESULT:\n{response_str}"
+                        )
             # ADK emite eventos de distintos tipos; nos interesa la respuesta final
             if event.is_final_response():
                 if event.content and event.content.parts:
@@ -156,6 +184,11 @@ class BaseMLAgent(A2AServer):
                         for part in event.content.parts
                         if hasattr(part, "text") and part.text
                     )
+                agent_logger.info(
+                    f"AGENT: {self.agent_name}\n"
+                    f"INPUT:\n{message[:500]}{'...' if len(message) > 500 else ''}\n"
+                    f"FINAL RESPONSE:\n{final_response}"
+                )
                 break
 
         if not final_response:

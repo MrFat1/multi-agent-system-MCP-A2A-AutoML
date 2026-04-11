@@ -21,8 +21,6 @@ Puertos por defecto:
 
 from __future__ import annotations
 
-import json
-import logging
 import uuid
 from typing import Any
 
@@ -40,7 +38,8 @@ from a2a.types import (
 
 from A2A.A2AServer import A2AServer
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 # ─────────────────────────────────────────────────────────
 # Configuración de agentes conocidos
@@ -130,13 +129,13 @@ class OrchestratorAgent(A2AServer):
         try:
 
             # ── Paso 1: Data Agent ─────────────────────────────────────────
-            logger.info(f"[{self.agent_name}] → Delegando al Data Agent...")
+            logger.info(f"[{self.agent_name}] -> Delegando al Data Agent...")
             data_report = await self._call_agent(
                 agent_name="DataAgent",
                 message=f"Prepara el dataset para el pipeline ML: {message}",
                 context_id=context_id,
             )
-            logger.info(f"[{self.agent_name}] ✓ Data Agent completado.")
+            logger.info(f"[{self.agent_name}] Data Agent completado.")
 
             # Verificar si el Data Agent encontró errores críticos
             if self._contains_critical_error(data_report):
@@ -151,7 +150,7 @@ class OrchestratorAgent(A2AServer):
             retry_context = ""
 
             for attempt in range(1, MAX_RETRIES + 1):
-                logger.info(f"[{self.agent_name}] → Delegando al ML Agent (intento {attempt}/{MAX_RETRIES})...")
+                logger.info(f"[{self.agent_name}] -> Delegando al ML Agent (intento {attempt}/{MAX_RETRIES})...")
 
                 ml_report = await self._call_agent(
                     agent_name="MLAgent",
@@ -161,7 +160,7 @@ class OrchestratorAgent(A2AServer):
                     ),
                     context_id=context_id,
                 )
-                logger.info(f"[{self.agent_name}] ✓ ML Agent intento {attempt} completado.")
+                logger.info(f"[{self.agent_name}] ML Agent intento {attempt} completado.")
 
                 # Verificar si las métricas son aceptables
                 if not self._needs_retry(ml_report) or attempt == MAX_RETRIES:
@@ -180,7 +179,7 @@ class OrchestratorAgent(A2AServer):
 
             # ── Paso 3: Eval Agent ──────────────────────────────────────────
 
-            logger.info(f"[{self.agent_name}] → Delegando al Eval Agent...")
+            logger.info(f"[{self.agent_name}] -> Delegando al Eval Agent...")
             eval_report = await self._call_agent(
                 agent_name="EvalAgent",
                 message=(
@@ -190,7 +189,7 @@ class OrchestratorAgent(A2AServer):
                 ),
                 context_id=context_id,
             )
-            logger.info(f"[{self.agent_name}] ✓ Eval Agent completado.")
+            logger.info(f"[{self.agent_name}] Eval Agent completado.")
 
             # ── Respuesta final al usuario ───────────────────────────────────
             return (
@@ -236,7 +235,12 @@ class OrchestratorAgent(A2AServer):
 
     def _contains_critical_error(self, data_report: str) -> bool:
         """Detecta si el Data Agent reportó un error crítico que impide continuar."""
-        keywords = ["can_train: false", "can_train=false", "critical", "detenido", "bloqueado"]
+        keywords = [
+            "can_train: false", "can_train=false",
+            "detenido", "bloqueado",
+            "archivo no encontrado", "filenotfounderror",
+            "error:", "no encontrado",
+        ]
         return any(kw in data_report.lower() for kw in keywords)
 
     # ─────────────────────────────────────────────────────

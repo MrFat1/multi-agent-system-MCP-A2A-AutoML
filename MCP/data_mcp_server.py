@@ -31,13 +31,14 @@ import sys
 
 warnings.filterwarnings("ignore")
 
-import logging
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 import uvicorn
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Servidor
@@ -789,7 +790,7 @@ def split_dataset(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    logging.info("Starting Data MCP server at port 9001...")
+    logger.info("Starting Data MCP server at port 9001...")
     #mcp.run(transport="sse")
     #from mcp.server.fastmcp import FastMCP
     #logging.info([m for m in dir(FastMCP) if not m.startswith('_')])
