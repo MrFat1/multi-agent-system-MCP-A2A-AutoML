@@ -171,11 +171,19 @@ class BaseMLAgent(A2AServer):
                         response_str = json.dumps(
                             fr.response, indent=2, ensure_ascii=False, default=str
                         ) if isinstance(fr.response, dict) else str(fr.response)
+
+                        try:
+                            parsed = json.loads(response_str)
+                            pretty_response = json.dumps(parsed, indent=2, ensure_ascii=False)
+                        except Exception:
+                            pretty_response = response_str
+
                         agent_logger.info(
                             f"AGENT: {self.agent_name}\n"
                             f"TOOL RESPONSE: {fr.name}\n"
-                            f"RESULT:\n{response_str}"
+                            f"RESULT:\n{pretty_response}"
                         )
+
             # ADK emite eventos de distintos tipos; nos interesa la respuesta final
             if event.is_final_response():
                 if event.content and event.content.parts:
@@ -184,10 +192,16 @@ class BaseMLAgent(A2AServer):
                         for part in event.content.parts
                         if hasattr(part, "text") and part.text
                     )
+
+                try:
+                    parsed = json.loads(final_response)
+                    pretty_response = json.dumps(parsed, indent=2, ensure_ascii=False)
+                except Exception:
+                    pretty_response = final_response
                 agent_logger.info(
                     f"AGENT: {self.agent_name}\n"
                     f"INPUT:\n{message[:500]}{'...' if len(message) > 500 else ''}\n"
-                    f"FINAL RESPONSE:\n{final_response}"
+                    f"FINAL RESPONSE:\n{pretty_response}"
                 )
                 break
 

@@ -87,7 +87,7 @@ en lo que detectaste en los pasos anteriores:
   - drop_high_missing: 40.0 por defecto
   - drop_duplicates: True siempre
   - drop_constants: True siempre
-Guarda el resultado en la misma carpeta del dataset con sufijo "_processed".
+Guarda el resultado en la carpeta outputs/<nombre identificativo del dataset> con sufijo "_processed".
 
 ### Paso 5 — split_dataset
 Llama a split_dataset sobre el dataset procesado:
@@ -95,7 +95,7 @@ Llama a split_dataset sobre el dataset procesado:
   - stratify: True si es clasificación, False si es regresión o series temporales
   - random_state: 42 siempre
   - output_format: "csv"
-Guarda los splits en una subcarpeta "splits/" junto al dataset.
+Guarda los splits en una subcarpeta "splits/<nombre identificativo del dataset>" junto al dataset.
 
 ## Tu output final
 
