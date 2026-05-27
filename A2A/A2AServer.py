@@ -137,9 +137,7 @@ class A2AServer(ABC):
                     "error": {"code": -32603, "message": str(e)},
                 })
 
-    # ─────────────────────────────────────────────────────
-    # HANDLERS DE TAREAS A2A
-    # ─────────────────────────────────────────────────────
+    # Handlers
     async def _handle_task_send(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Maneja tasks/send: extrae el texto, ejecuta el agente, devuelve la respuesta.
@@ -256,9 +254,8 @@ class A2AServer(ABC):
             )
         return {"id": task_id, "status": {"state": TaskState.canceled}}
 
-    # ─────────────────────────────────────────────────────
-    # UTILIDADES
-    # ─────────────────────────────────────────────────────
+
+    # Utils
     @staticmethod
     def _extract_text_from_context(context: RequestContext) -> str:
         """Extrae el texto plano del RequestContext del SDK."""

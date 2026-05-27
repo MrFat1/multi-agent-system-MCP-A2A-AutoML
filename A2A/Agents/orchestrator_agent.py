@@ -45,11 +45,21 @@ logger = get_logger(__name__)
 # Configuración de agentes conocidos
 # ─────────────────────────────────────────────────────────
 
-AGENT_URLS = {
-    "DataAgent": "http://localhost:8001",
-    "MLAgent":   "http://localhost:8002",
-    "EvalAgent": "http://localhost:8003",
-}
+# URLs donde el orquestador buscará agentes al arrancar.
+# Solo este listado necesita actualizarse si se añaden nuevos agentes.
+KNOWN_AGENT_URLS: list[str] = [
+    "http://localhost:8001",
+    "http://localhost:8002",
+    "http://localhost:8003",
+]
+
+# Orden explícito del pipeline. Debe coincidir con los skill.id
+# declarados en las Agent Cards de cada sub-agente.
+PIPELINE_SKILLS: list[str] = [
+    "data_preparation",
+    "model_training",
+    "model_evaluation",
+]
 
 MAX_RETRIES = 2        # intentos máximos de reentrenamiento si métricas son insuficientes
 HTTP_TIMEOUT = 300.0   # segundos — los agentes pueden tardar en entrenar
@@ -74,6 +84,8 @@ class OrchestratorAgent(A2AServer):
     def __init__(self, host: str = "localhost", port: int = 8000):
         super().__init__(host=host, port=port)
         self._http = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
+        # skill_id -> (agent_name, base_url)
+        self._skill_registry: dict[str, tuple[str, str]] = {}
 
     # ─────────────────────────────────────────────────────
     # Identidad A2AServer
@@ -124,6 +136,11 @@ class OrchestratorAgent(A2AServer):
         Coordina los 3 agentes en secuencia y gestiona reintentos.
         """
         context_id = context.get("context_id", str(uuid.uuid4()))
+
+        # Descubrimiento lazy: se ejecuta solo una vez por instancia
+        if not self._skill_registry:
+            await self._discover_agents()
+
         logger.info(f"[{self.agent_name}] Iniciando pipeline para: '{message[:80]}'")
 
         try:
@@ -131,7 +148,7 @@ class OrchestratorAgent(A2AServer):
             # ── Paso 1: Data Agent ─────────────────────────────────────────
             logger.info(f"[{self.agent_name}] -> Delegando al Data Agent...")
             data_report = await self._call_agent(
-                agent_name="DataAgent",
+                skill_id="data_preparation",
                 message=f"Prepara el dataset para el pipeline ML: {message}",
                 context_id=context_id,
             )
@@ -153,7 +170,7 @@ class OrchestratorAgent(A2AServer):
                 logger.info(f"[{self.agent_name}] -> Delegando al ML Agent (intento {attempt}/{MAX_RETRIES})...")
 
                 ml_report = await self._call_agent(
-                    agent_name="MLAgent",
+                    skill_id="model_training",
                     message=(
                         f"Entrena el mejor modelo ML posible con los siguientes datos:\n\n"
                         f"{data_report}{retry_context}"
@@ -181,7 +198,7 @@ class OrchestratorAgent(A2AServer):
 
             logger.info(f"[{self.agent_name}] -> Delegando al Eval Agent...")
             eval_report = await self._call_agent(
-                agent_name="EvalAgent",
+                skill_id="model_evaluation",
                 message=(
                     f"Evalúa el modelo entrenado y genera el reporte final.\n\n"
                     f"## DATA AGENT CONTEXT\n{data_report}\n\n"
@@ -235,31 +252,73 @@ class OrchestratorAgent(A2AServer):
 
     def _contains_critical_error(self, data_report: str) -> bool:
         """Detecta si el Data Agent reportó un error crítico que impide continuar."""
+        """
         keywords = [
             "can_train: false", "can_train=false",
             "detenido", "bloqueado",
             "archivo no encontrado", "filenotfounderror",
             "error:", "no encontrado",
         ]
-        return any(kw in data_report.lower() for kw in keywords)
+        """
+        report_lower = data_report.lower()
+        return "can_train: false" in report_lower or "can_train=false" in report_lower
+
+        #return any(kw in data_report.lower() for kw in keywords)
 
     # ─────────────────────────────────────────────────────
     # Comunicación A2A con agentes
     # ─────────────────────────────────────────────────────
 
+    async def _discover_agents(self) -> None:
+        """
+        Consulta /.well-known/agent.json de cada URL en KNOWN_AGENT_URLS,
+        parsea la Agent Card y registra sus skills en _skill_registry.
+
+        Lanza RuntimeError si alguna skill de PIPELINE_SKILLS no se encuentra.
+        """
+        self._skill_registry = {}
+
+        for base_url in KNOWN_AGENT_URLS:
+            try:
+                resp = await self._http.get(f"{base_url}/.well-known/agent.json")
+                resp.raise_for_status()
+                card = AgentCard.model_validate(resp.json())
+
+                for skill in card.skills:
+                    self._skill_registry[skill.id] = (card.name, base_url)
+                    logger.info(
+                        f"[{self.agent_name}] Skill '{skill.id}' "
+                        f"registrada -> {card.name} ({base_url})"
+                    )
+
+            except Exception as e:
+                logger.warning(
+                    f"[{self.agent_name}] No se pudo leer Agent Card "
+                    f"de {base_url}: {e}"
+                )
+
+        missing = [s for s in PIPELINE_SKILLS if s not in self._skill_registry]
+        if missing:
+            raise RuntimeError(
+                f"Pipeline incompleto. Skills no encontradas en ningún agente: {missing}"
+            )
+
     async def _call_agent(
         self,
-        agent_name: str,
+        skill_id: str,
         message: str,
         context_id: str,
     ) -> str:
         """
         Envía un mensaje a un agente via JSON-RPC A2A y devuelve su respuesta.
         """
-        base_url = AGENT_URLS.get(agent_name)
-        if not base_url:
-            raise ValueError(f"Agente desconocido: {agent_name}")
-
+        entry = self._skill_registry.get(skill_id)
+        if not entry:
+            raise AgentCallError(
+                skill_id,
+                f"Ningún agente registrado para la skill '{skill_id}'"
+            )
+        agent_name, base_url = entry
         rpc_url = f"{base_url}/rpc"
         task_id = str(uuid.uuid4())
 

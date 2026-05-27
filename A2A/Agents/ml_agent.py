@@ -58,9 +58,10 @@ Usa tu inteligencia para tomar las mejores decisiones, no sigas reglas fijas.
 | Alias                 | Tarea                        |
 |-----------------------|------------------------------|
 | logistic_regression   | classification               |
+| linear_regression     | regression                   |
 | random_forest         | classification / regression  |
-| gradient_boosting     | classification / regression  |
-| prophet               | timeseries                   |
+| xgboost               | classification / regression  |
+| sarima                | timeseries                   |
 
 ## Tu flujo de trabajo:
 
@@ -75,16 +76,21 @@ Lee detenidamente el reporte recibido. Extrae:
 ### Paso 2 — Decidir el modelo e hiperparámetros iniciales
 Usa tu criterio para elegir el modelo más apropiado:
   - Dataset pequeño (<1000 filas) + clasificación → logistic_regression o random_forest
-  - Dataset mediano/grande + relaciones no lineales → gradient_boosting o random_forest
-  - Series temporales → prophet (obligatorio)
+  - Regresión lineal simple / features numéricas sin mucha interacción → linear_regression
+  - Dataset mediano/grande + relaciones no lineales → xgboost o random_forest
+  - Series temporales → sarima (obligatorio)
   - Dataset desbalanceado → considera class_weight en los hiperparámetros
 
-Para prophet, necesitarás además identificar la columna de fecha (date_column).
+Para sarima, los hiperparámetros clave son:
+  - order: tupla (p, d, q) — AR order, differencing, MA order. Default: (1, 1, 1)
+  - seasonal_order: tupla (P, D, Q, s) — componente estacional. Default: (0, 0, 0, 0)
+    Ejemplos: (1, 1, 1, 12) para datos mensuales, (1, 1, 1, 4) para trimestrales.
+  - date_column: nombre de la columna de fechas (opcional pero recomendado para alinear el índice temporal).
 
 ### Paso 3 — tune_hyperparams (OPCIONAL, decide según contexto)
 Llama a tune_hyperparams SOLO si:
   - El dataset tiene más de 500 filas (suficiente para CV fiable)
-  - No es prophet (prophet no soporta este HPO)
+  - No es sarima (sarima no soporta este HPO)
   - El Data Agent no indicó restricciones de tiempo
 
 Si decides no hacer HPO, usa hiperparámetros razonables por defecto
@@ -144,7 +150,7 @@ Genera un resumen con el siguiente formato EXACTO:
 
 ## Reglas importantes:
 - Usa SIEMPRE los alias exactos de la tabla de modelos disponibles.
-- Para prophet, el task debe ser "timeseries" (no "regression").
+- Para sarima, el task debe ser "timeseries" (no "regression").
 - Nunca inventes métricas. Usa exactamente las que devuelve train_model.
 - Si train_model falla, reporta el error claramente al Orchestrator.
 - log_run es OBLIGATORIO. No termines sin registrar el experimento.
@@ -174,7 +180,7 @@ Genera un resumen con el siguiente formato EXACTO:
             defaultOutputModes=["text/plain"],
             skills=[
                 AgentSkill(
-                    id="model_selection_training",
+                    id="model_training",
                     name="Model Selection & Training",
                     description=(
                         "Selecciona el modelo ML más adecuado según el EDA, "

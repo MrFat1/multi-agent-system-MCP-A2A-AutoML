@@ -15,11 +15,12 @@ el agente LLM, no este servidor.
 
 Modelos soportados (alias → clase):
   Clasificación / Regresión:
+    - linear_regression    → LinearRegression
     - logistic_regression  → LogisticRegression
     - random_forest        → RandomForestClassifier / RandomForestRegressor
-    - gradient_boosting    → GradientBoostingClassifier / GradientBoostingRegressor
+    - xgboost              → XGBClassifier/XGBRegressor
   Series temporales:
-    - prophet              → Prophet (interfaz propia, no sklearn)
+    - sarima               → SARIMAX (statsmodels, interfaz propia, no sklearn)
 
 Uso:
     python -m mcp run ml_mcp_server.py
@@ -41,10 +42,10 @@ import pandas as pd
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from xgboost import XGBClassifier, XGBRegressor
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     accuracy_score, f1_score, mean_absolute_error,
     mean_squared_error, r2_score, roc_auc_score,
@@ -94,19 +95,24 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "regression": None,
         "default_params": {"max_iter": 1000, "random_state": 42},
     },
+    "linear_regression": {
+        "classification": None,
+        "regression": LinearRegression,
+        "default_params": {"fit_intercept": True},
+    },
     "random_forest": {
         "classification": RandomForestClassifier,
         "regression": RandomForestRegressor,
         "default_params": {"n_estimators": 100, "random_state": 42},
     },
-    "gradient_boosting": {
-        "classification": GradientBoostingClassifier,
-        "regression": GradientBoostingRegressor,
-        "default_params": {"n_estimators": 100, "random_state": 42},
+    "xgboost": {
+        "classification": XGBClassifier,
+        "regression": XGBRegressor,
+        "default_params": {"n_estimators": 100, "random_state": 42, "verbosity": 0},
     },
-    "prophet": {
+    "sarima": {
         "timeseries": True,
-        "default_params": {"yearly_seasonality": "auto", "weekly_seasonality": "auto"},
+        "default_params": {"order": (1, 1, 1), "seasonal_order": (0, 0, 0, 0)},
     },
 }
 
@@ -117,19 +123,25 @@ HPO_SEARCH_SPACES: dict[str, dict[str, Any]] = {
         "model__solver": ["lbfgs", "liblinear"],
         "model__penalty": ["l2"],
     },
+    "linear_regression": {
+        "model__fit_intercept": [True, False],
+        "model__positive": [False, True],
+    },
     "random_forest": {
         "model__n_estimators": [50, 100, 200, 300],
         "model__max_depth": [None, 5, 10, 20],
         "model__min_samples_split": [2, 5, 10],
         "model__min_samples_leaf": [1, 2, 4],
     },
-    "gradient_boosting": {
-        "model__n_estimators": [50, 100, 200],
+    "xgboost": {
+        "model__n_estimators": [50, 100, 200, 300],
         "model__learning_rate": [0.01, 0.05, 0.1, 0.2],
-        "model__max_depth": [3, 5, 7],
+        "model__max_depth": [3, 5, 7, 9],
         "model__subsample": [0.8, 1.0],
+        "model__colsample_bytree": [0.8, 1.0],
+        "model__min_child_weight": [1, 3, 5],
     },
-    "prophet": {},  # Prophet no usa sklearn HPO
+    "sarima": {},  # SARIMA no usa sklearn HPO
 }
 
 
@@ -306,7 +318,7 @@ def train_model(
     test_path: Annotated[str, Field(description="Ruta al archivo test (CSV o Parquet).")],
     target_column: Annotated[str, Field(description="Nombre de la columna objetivo.")],
     model_alias: Annotated[
-        Literal["logistic_regression", "random_forest", "gradient_boosting", "prophet"],
+        Literal["logistic_regression", "linear_regression", "random_forest", "xgboost", "sarima"],
         Field(description="Alias del modelo a entrenar.")
     ],
     task: Annotated[
@@ -323,7 +335,7 @@ def train_model(
     ] = None,
     date_column: Annotated[
         Optional[str],
-        Field(description="Solo para Prophet: nombre de la columna de fechas.")
+        Field(description="Para SARIMA: nombre de la columna de fechas (opcional, se usará como índice temporal).")
     ] = None,
     output_dir: Annotated[
         str,
@@ -344,53 +356,60 @@ def train_model(
     MODELS_DIR_.mkdir(parents=True, exist_ok=True)
     run_id = str(uuid.uuid4())[:8]
 
-    # ── Prophet (serie temporal) ──────────────────────────────────────────
-    if task == "timeseries" or model_alias == "prophet":
+    # ── SARIMA (serie temporal) ───────────────────────────────────────────
+    if task == "timeseries" or model_alias == "sarima":
         try:
-            from prophet import Prophet
+            from statsmodels.tsa.statespace.sarimax import SARIMAX
         except ImportError:
-            raise ImportError("Prophet no está instalado. Ejecuta: pip install prophet")
+            raise ImportError("statsmodels no está instalado. Ejecuta: pip install statsmodels")
 
         df_train = pd.read_csv(train_path) if train_path.endswith(".csv") else pd.read_parquet(train_path)
         df_test  = pd.read_csv(test_path)  if test_path.endswith(".csv")  else pd.read_parquet(test_path)
 
-        if date_column is None:
-            raise ValueError("Para Prophet debes indicar 'date_column'.")
-        if date_column not in df_train.columns:
-            raise ValueError(f"Columna de fecha '{date_column}' no encontrada.")
+        if target_column not in df_train.columns:
+            raise ValueError(f"Columna target '{target_column}' no encontrada.")
 
-        # Prophet requiere columnas 'ds' y 'y'
-        df_prophet_train = df_train.rename(columns={date_column: "ds", target_column: "y"})[["ds", "y"]]
-        df_prophet_test  = df_test.rename(columns={date_column: "ds", target_column: "y"})[["ds", "y"]]
-        df_prophet_train["ds"] = pd.to_datetime(df_prophet_train["ds"])
-        df_prophet_test["ds"]  = pd.to_datetime(df_prophet_test["ds"])
+        if date_column:
+            df_train[date_column] = pd.to_datetime(df_train[date_column])
+            df_test[date_column]  = pd.to_datetime(df_test[date_column])
+            df_train = df_train.set_index(date_column)
+            df_test  = df_test.set_index(date_column)
 
-        defaults = MODEL_REGISTRY["prophet"]["default_params"].copy()
+        y_train = df_train[target_column].astype(float)
+        y_test  = df_test[target_column].astype(float)
+
+        defaults = MODEL_REGISTRY["sarima"]["default_params"].copy()
         defaults.update(hyperparams)
-        model = Prophet(**defaults)
-        model.fit(df_prophet_train)
 
-        future = df_prophet_test[["ds"]]
-        forecast = model.predict(future)
-        y_pred = forecast["yhat"].values
-        y_true = df_prophet_test["y"].values
+        order          = tuple(defaults.get("order", (1, 1, 1)))
+        seasonal_order = tuple(defaults.get("seasonal_order", (0, 0, 0, 0)))
 
-        train_forecast = model.predict(df_prophet_train[["ds"]])
-        train_metrics = _compute_regression_metrics(df_prophet_train["y"], train_forecast["yhat"].values)
-        test_metrics  = _compute_regression_metrics(pd.Series(y_true), y_pred)
+        fitted = SARIMAX(y_train, order=order, seasonal_order=seasonal_order).fit(disp=False)
 
-        model_path = MODELS_DIR_ / f"prophet_{run_id}.pkl"
-        joblib.dump(model, model_path)
+        train_pred = fitted.fittedvalues
+        y_pred     = fitted.forecast(steps=len(y_test)).values
+
+        train_metrics = _compute_regression_metrics(y_train, train_pred.values)
+        test_metrics  = _compute_regression_metrics(y_test, y_pred)
+
+        model_path = MODELS_DIR_ / f"sarima_{run_id}.pkl"
+        joblib.dump(fitted, model_path)
+
+        verdict = _verdict(test_metrics, "timeseries")
+        overfit = _overfit_check(train_metrics, test_metrics, "timeseries")
 
         return {
             "run_id": run_id,
-            "model_alias": "prophet",
+            "model_alias": "sarima",
             "task": "timeseries",
-            "hyperparams_used": defaults,
+            "hyperparams_used": {"order": order, "seasonal_order": seasonal_order},
             "train_metrics": train_metrics,
             "test_metrics": test_metrics,
             "model_path": str(model_path),
-            "experiment_name": experiment_name or f"prophet_{run_id}",
+            "experiment_name": experiment_name or f"sarima_{run_id}",
+            "verdict": verdict,
+            "overfit_check": overfit,
+            "recommendation": _recommendation(verdict, overfit, "sarima"),
         }
 
     # ── Sklearn (clasificación / regresión) ───────────────────────────────
@@ -456,7 +475,7 @@ def tune_hyperparams(
     train_path: Annotated[str, Field(description="Ruta al archivo train (CSV o Parquet).")],
     target_column: Annotated[str, Field(description="Nombre de la columna objetivo.")],
     model_alias: Annotated[
-        Literal["logistic_regression", "random_forest", "gradient_boosting"],
+        Literal["logistic_regression", "linear_regression", "random_forest", "xgboost"],
         Field(description="Alias del modelo. Prophet no soporta HPO con este método.")
     ],
     task: Annotated[
@@ -496,10 +515,10 @@ def tune_hyperparams(
 
     Prophet no está soportado aquí ya que su HPO requiere un enfoque diferente.
     """
-    if model_alias == "prophet":
+    if model_alias == "sarima":
         return {
-            "error": "Prophet no soporta HPO con RandomizedSearchCV. "
-                     "Usa los defaults o pasa hiperparámetros directamente a train_model."
+            "error": "SARIMA no soporta HPO con RandomizedSearchCV. "
+                     "Pasa order y seasonal_order directamente a train_model."
         }
 
     X_train, y_train, _, _ = _load_splits(

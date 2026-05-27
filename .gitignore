@@ -4,6 +4,8 @@
 .env
 .env.*
 !.env.example
+uv.lock
+pyproject.toml
 
 # ----------------------
 # IDEs / Editors
@@ -17,6 +19,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.python-version
 .venv/
 venv/
 env/
