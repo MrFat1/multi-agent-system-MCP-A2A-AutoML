@@ -54,7 +54,7 @@ Recibirás del Orchestrator:
   - model_path: ruta al modelo entrenado por el ML Agent
   - run_id: identificador del experimento
   - model_alias: nombre del modelo
-  - task: tipo de tarea (classification / regression / timeseries)
+  - task: tipo de tarea (classification / regression)
   - test_path: ruta al test set
   - target_column: columna objetivo
   - ml_agent_report: reporte completo del ML Agent (hiperparámetros, métricas, reasoning)
@@ -65,8 +65,6 @@ Recibirás del Orchestrator:
 ### Paso 1 — compute_metrics
 Llama a compute_metrics con:
   - model_path, test_path, target_column, task
-  - date_column: solo si task es "timeseries" (extráelo del data_agent_report)
-
 Analiza los resultados:
   - ¿Son las métricas razonables para este tipo de tarea y dataset?
   - ¿Hay señales de underfitting (métricas muy bajas en test)?
@@ -74,31 +72,42 @@ Analiza los resultados:
 
 ### Paso 2 — compare_models
 Llama a compare_models con:
+  - run_id: el run_id del experimento actual (el servidor determina
+    automáticamente el dataset y filtra los runs comparables)
   - task: el tipo de tarea
   - top_n: 5
 
-Analiza el ranking:
-  - ¿Es el modelo actual el mejor?
-  - ¿Hay runs anteriores significativamente mejores?
+Si dataset_warning está presente en la respuesta, inclúyelo en agent_notes
+del reporte para que el usuario sea consciente de la limitación.
+
+Usa compare_models ÚNICAMENTE como referencia informativa:
+  - Muestra el ranking histórico en el reporte para que el usuario tenga contexto
   - ¿Hay una advertencia de overfitting (overfit_warning)?
-  Si el modelo actual no es el mejor del ranking, usa el mejor run_id
-  y model_path para los siguientes pasos.
+  IMPORTANTE: Usa SIEMPRE el run_id y model_path del experimento actual
+  (el recibido del ML Agent) para save_best_model y generate_report.
+  Nunca sustituyas el modelo actual por uno de runs anteriores, aunque
+  el ranking muestre que un modelo histórico tiene mejores métricas.
+  Cada ejecución del pipeline evalúa y promueve su propio modelo.
 
 ### Paso 3 — save_best_model
-Llama a save_best_model con el run_id y model_path del MEJOR modelo
-identificado en compare_models (puede ser el actual u otro anterior).
+Llama a save_best_model con el run_id y model_path del experimento actual
+(el recibido del ML Agent). No uses run_ids de runs anteriores.
 
 ### Paso 4 — generate_report
 Llama a generate_report con TODOS los datos disponibles:
-  - task, best_run_id, metrics (de compute_metrics), model_alias, hyperparams
-  - dataset_path: del data_agent_report si está disponible
+  - task: el tipo de tarea
+  - best_run_id: el run_id del experimento ACTUAL (el recibido del ML Agent)
+  - metrics: de compute_metrics
+  - model_alias, hyperparams: del experimento actual
+  - dataset_path: el campo dataset_path devuelto por compare_models
   - per_class_metrics y confusion_matrix_data: si task es "classification"
   - overfit_warning: del resultado de compare_models si existe
+  - ranking: el campo ranking devuelto por compare_models (la lista completa).
+    Esto genera la tabla comparativa en el reporte Markdown.
   - agent_notes: escribe un párrafo con tu análisis completo del pipeline:
       · Qué modelo se entrenó y por qué fue el elegido
       · Análisis de las métricas (¿son buenas? ¿hay margen de mejora?)
       · Si hay overfitting y qué podría hacerse
-      · Comparativa con otros runs si los hay
       · Conclusión y recomendación para el usuario
 
 ## Tu output final
@@ -116,10 +125,6 @@ Genera una respuesta con el siguiente formato EXACTO:
 ### Final metrics (test set)
 <métricas principales del mejor modelo>
 
-### Comparison
-<si hay más de 1 run: tabla comparativa de los top runs>
-<si solo hay 1 run: "Only one run available">
-
 ### Warnings
 <overfit_warning si existe, o "None">
 
@@ -129,7 +134,8 @@ Genera una respuesta con el siguiente formato EXACTO:
 
 ## Reglas importantes:
 - Nunca inventes métricas. Usa exactamente las que devuelven las tools.
-- Si compare_models devuelve un modelo mejor que el actual, usa ese.
+- Usa SIEMPRE el run_id del experimento actual para save_best_model y generate_report.
+  compare_models es informativo (muestra contexto histórico), no determina el modelo a usar.
 - generate_report es el artefacto final que llega al usuario. Sé exhaustivo
   en agent_notes: es el único lugar donde el usuario verá el razonamiento del pipeline.
 - Reporta SIEMPRE production_path y report_path en tu output.

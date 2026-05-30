@@ -73,7 +73,6 @@ SKEWNESS_THRESHOLD = 1.0      # |skew| > threshold → flag distribución sesgad
 MISSING_WARN_PCT = 5.0        # % missing para warning
 MISSING_CRITICAL_PCT = 40.0  # % missing para error crítico
 
-
 # ---------------------------------------------------------------------------
 # Helpers internos
 # ---------------------------------------------------------------------------
@@ -174,7 +173,6 @@ def _build_schema(df: pd.DataFrame) -> dict[str, Any]:
         for col, dtype in df.dtypes.items()
     }
 
-
 # ---------------------------------------------------------------------------
 # TOOL 1 — preview_dataset
 # ---------------------------------------------------------------------------
@@ -246,6 +244,7 @@ def describe_dataset(
     categorical_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
     datetime_cols = df.select_dtypes(include=["datetime64"]).columns.tolist()
     bool_cols = df.select_dtypes(include=["bool"]).columns.tolist()
+    df[bool_cols] = df[bool_cols].astype(int)
 
     # ── Análisis por columna ───────────────────────────────────────────────
     columns_analysis: dict[str, Any] = {}
@@ -454,7 +453,15 @@ def detect_problems(
     missing = df.isnull().sum()
     for col, count in missing[missing > 0].items():
         pct = round(count / len(df) * 100, 2)
-        severity = "CRITICAL" if pct >= MISSING_CRITICAL_PCT else "WARNING"
+        if pct >= MISSING_CRITICAL_PCT:
+            if col == target_column:
+                # Target con muchos nulos → irreparable, bloquea el pipeline
+                severity = "CRITICAL"
+            else:
+                # Feature eliminable → warning, drop_high_missing lo resolverá
+                severity = "WARNING"
+        else:
+            severity = "WARNING"
         add(severity, "MISSING_VALUES",
             f"'{col}' tiene {count} valores faltantes ({pct}%).",
             {"column": col, "missing_count": int(count), "missing_pct": pct})
@@ -674,7 +681,7 @@ def preprocess_dataset(
     if encode_categoricals:
         low_card = [c for c in cat_cols if df[c].nunique() <= HIGH_CARDINALITY_THRESHOLD]
         if low_card:
-            df = pd.get_dummies(df, columns=low_card, drop_first=False)
+            df = pd.get_dummies(df, columns=low_card, drop_first=False, dtype=int)
             encoded_cols = low_card
             log("one_hot_encoding", {"encoded_columns": encoded_cols})
 
@@ -783,7 +790,6 @@ def split_dataset(
     except Exception as e:
             print(f"Error en split_dataset: {str(e)}", file=sys.stderr)
             return {"status": "error", "message": str(e)}
-
 
 # ---------------------------------------------------------------------------
 # Entrypoint

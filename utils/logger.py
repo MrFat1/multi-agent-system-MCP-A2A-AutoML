@@ -65,7 +65,7 @@ def get_logger(name: str, log_file: str = "outputs/logs/ml_pipeline.log") -> log
     _loggers[name] = logger
     return logger
 
-def get_agent_logger(log_file: str = "outputs/logs/agents.log") -> logging.Logger:
+def get_agent_logger(log_file: str = "outputs/logs/agents_v3.log") -> logging.Logger:
     """
     Logger dedicado a las respuestas y razonamientos de los agentes.
     Escribe en agents.log (además de consola) para separar la traza

@@ -17,6 +17,7 @@ que tiene suficiente información para responder.
 from __future__ import annotations
 
 import json
+import time
 
 from abc import abstractmethod
 from typing import Any
@@ -35,7 +36,7 @@ from utils.logger import get_logger, get_agent_logger
 logger = get_logger(__name__)
 agent_logger = get_agent_logger()
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = 'gemini-3.1-flash-lite' #"gemini-2.5-flash"
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -146,6 +147,8 @@ class BaseMLAgent(A2AServer):
         final_response = ""
 
         # Iterar sobre los eventos del runner hasta obtener la respuesta final
+        start_time = time.time()
+        iteration = 0
         async for event in runner.run_async(
             user_id="pipeline",
             session_id=session.id,
@@ -158,8 +161,10 @@ class BaseMLAgent(A2AServer):
 
                     # El agente decide llamar a una tool
                     if hasattr(part, "function_call") and part.function_call:
+                        iteration += 1
                         fc = part.function_call
                         agent_logger.info(
+                            f"TASK ID: {task_id}\n"
                             f"AGENT: {self.agent_name}\n"
                             f"TOOL CALL: {fc.name}\n"
                             f"PARAMS:\n{json.dumps(dict(fc.args), indent=2, ensure_ascii=False, default=str)}"
@@ -179,6 +184,7 @@ class BaseMLAgent(A2AServer):
                             pretty_response = response_str
 
                         agent_logger.info(
+                            f"TASK ID: {task_id}\n"
                             f"AGENT: {self.agent_name}\n"
                             f"TOOL RESPONSE: {fr.name}\n"
                             f"RESULT:\n{pretty_response}"
@@ -186,6 +192,7 @@ class BaseMLAgent(A2AServer):
 
             # ADK emite eventos de distintos tipos; nos interesa la respuesta final
             if event.is_final_response():
+                elapsed = time.time() - start_time
                 if event.content and event.content.parts:
                     final_response = "".join(
                         part.text
@@ -198,6 +205,7 @@ class BaseMLAgent(A2AServer):
                     pretty_response = json.dumps(parsed, indent=2, ensure_ascii=False)
                 except Exception:
                     pretty_response = final_response
+                agent_logger.info(f"AGENT: {self.agent_name} | TASK: {task_id} | COMPLETED in {elapsed:.2f}s | ITERATIONS: {iteration}")
                 agent_logger.info(
                     f"AGENT: {self.agent_name}\n"
                     f"INPUT:\n{message[:500]}{'...' if len(message) > 500 else ''}\n"

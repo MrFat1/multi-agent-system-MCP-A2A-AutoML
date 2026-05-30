@@ -31,4 +31,5 @@ models/
 outputs/
 data/splits/
 splits/
-experiments/
+experiments*/
+reports*/

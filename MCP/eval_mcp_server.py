@@ -91,6 +91,17 @@ def _load_all_runs() -> list[dict]:
     return runs
 
 
+def _same_dataset(run_dataset_path: str | None, target: str) -> bool:
+    """True if both paths refer to the same dataset file.
+
+    Uses Path equality which normalises separators and removes redundant
+    components (e.g. './', duplicate slashes) without hitting the filesystem.
+    """
+    if run_dataset_path is None:
+        return False
+    return Path(run_dataset_path) == Path(target)
+
+
 def _format_metrics_table(metrics: dict[str, Any]) -> str:
     """Convierte un dict de métricas en tabla Markdown."""
     lines = ["| Métrica | Valor |", "|---------|-------|"]
@@ -142,23 +153,6 @@ def _save_regression_plot(y_true, y_pred, run_id, output_dir="reports/plots") ->
     plt.close(fig)
     return str(path)
 
-def _save_timeseries_plot(ds, y_true, y_pred, run_id, output_dir="reports/plots") -> str:
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(ds, y_true, label="Actual",    color="steelblue", linewidth=1.5)
-    ax.plot(ds, y_pred, label="Predicted", color="tomato",    linewidth=1.5, linestyle="--")
-    ax.set_title(f"Timeseries Forecast — {run_id}")
-    ax.set_xlabel("Date")
-    ax.legend()
-    ax.tick_params(axis="x", rotation=45)
-    fig.tight_layout()
-
-    path = Path(output_dir) / f"timeseries_plot_{run_id}.png"
-    fig.savefig(path, bbox_inches="tight", dpi=150)
-    plt.close(fig)
-    return str(path)
-
 # ---------------------------------------------------------------------------
 # TOOL 1 — compute_metrics
 # ---------------------------------------------------------------------------
@@ -169,13 +163,9 @@ def compute_metrics(
     test_path: Annotated[str, Field(description="Ruta al archivo test (CSV o Parquet).")],
     target_column: Annotated[str, Field(description="Nombre de la columna objetivo.")],
     task: Annotated[
-        Literal["classification", "regression", "timeseries"],
+        Literal["classification", "regression"],
         Field(description="Tipo de tarea ML.")
     ],
-    date_column: Annotated[
-        Optional[str],
-        Field(description="Solo para Prophet: nombre de la columna de fechas.")
-    ] = None,
     run_id: Annotated[Optional[str], Field(description="run_id del experimento, para nombrar los plots.")] = None,
     plots_dir: Annotated[str, Field(description="Directorio donde guardar los plots.")] = "reports/plots",
 ) -> dict:
@@ -185,45 +175,11 @@ def compute_metrics(
     Clasificación: accuracy, f1 (macro/weighted), roc_auc, matriz de confusión
     y classification_report completo por clase.
     Regresión: RMSE, MAE, R², MAPE.
-    Series temporales (Prophet): RMSE, MAE, R².
 
     Devuelve también un diagnóstico de overfitting si se encuentran
     las métricas de train en el experimento registrado.
     """
     model = joblib.load(model_path)
-
-    # ── Prophet ──────────────────────────────────────────────────────────
-    if task == "timeseries":
-        df = pd.read_csv(test_path) if test_path.endswith(".csv") else pd.read_parquet(test_path)
-        if date_column is None:
-            raise ValueError("Indica 'date_column' para evaluar un modelo Prophet.")
-        df_prophet = df.rename(columns={date_column: "ds", target_column: "y"})[["ds", "y"]]
-        df_prophet["ds"] = pd.to_datetime(df_prophet["ds"])
-
-        forecast = model.predict(df_prophet[["ds"]])
-        y_pred = forecast["yhat"].values
-        y_true = df_prophet["y"].values
-
-        mse  = mean_squared_error(y_true, y_pred)
-        mae  = mean_absolute_error(y_true, y_pred)
-        r2   = r2_score(y_true, y_pred)
-        mape = float(np.mean(np.abs((y_true - y_pred) / np.where(y_true == 0, 1e-9, y_true))) * 100)
-
-        plot_path = _save_timeseries_plot(
-                df_prophet["ds"], y_true, y_pred, run_id, plots_dir
-            ) if run_id else None
-
-        return {
-            "task": "timeseries",
-            "model_path": model_path,
-            "metrics": {
-                "rmse": round(float(np.sqrt(mse)), 4),
-                "mae":  round(mae, 4),
-                "r2":   round(r2, 4),
-                "mape_pct": round(mape, 4),
-            },
-            "plot_path": plot_path,
-        }
 
     # ── Sklearn ───────────────────────────────────────────────────────────
     X_test, y_test = _load_test(test_path, target_column)
@@ -290,7 +246,7 @@ def compute_metrics(
         r2   = r2_score(y_test, y_pred)
         mape = float(np.mean(np.abs((y_test.values - y_pred) / np.where(y_test.values == 0, 1e-9, y_test.values))) * 100)
 
-        plot_path = _save_regression_plot(y_true, y_pred, run_id or "unknown", plots_dir)
+        plot_path = _save_regression_plot(y_test, y_pred, run_id or "unknown", plots_dir)
 
         return {
             "task": "regression",
@@ -311,15 +267,16 @@ def compute_metrics(
 
 @mcp.tool()
 def compare_models(
+    run_id: Annotated[str, Field(description="run_id del experimento actual (devuelto por log_run). El servidor lo usa para determinar el dataset y filtrar runs comparables.")],
     task: Annotated[
-        Literal["classification", "regression", "timeseries"],
+        Literal["classification", "regression"],
         Field(description="Tipo de tarea para seleccionar la métrica de comparación.")
     ],
     primary_metric: Annotated[
         Optional[str],
         Field(description=(
             "Métrica principal de comparación. Si None se usa: "
-            "f1_weighted (clasificación), r2 (regresión), rmse (timeseries)."
+            "f1_weighted (clasificación), r2 (regresión)."
         ))
     ] = None,
     top_n: Annotated[
@@ -328,14 +285,17 @@ def compare_models(
     ] = 5,
 ) -> dict:
     """
-    Lee todos los experimentos registrados y devuelve un ranking comparativo.
+    Lee los experimentos registrados y devuelve un ranking comparativo.
 
-    El Eval Agent usa esta tool para seleccionar el mejor modelo antes de
-    llamar a save_best_model y generate_report. Devuelve el run_id y
-    model_path del ganador para que el agente pueda usarlos directamente.
+    Usa run_id para localizar el dataset del experimento actual y filtra
+    automáticamente los runs al mismo dataset, garantizando que las métricas
+    sean comparables. El agente solo necesita pasar su run_id.
+
+    Devuelve el run_id y model_path del ganador para que el agente pueda
+    usarlos directamente en save_best_model y generate_report.
     """
-    runs = _load_all_runs()
-    if not runs:
+    all_runs = _load_all_runs()
+    if not all_runs:
         return {
             "status": "no_runs",
             "message": "No hay experimentos en experiments/. Entrena al menos un modelo primero.",
@@ -343,11 +303,24 @@ def compare_models(
             "best_run": None,
         }
 
+    # Resolve dataset from the current run
+    current_run = next((r for r in all_runs if r["run_id"] == run_id), None)
+    dataset_path = current_run.get("dataset_path") if current_run else None
+
+    dataset_warning = None
+    if dataset_path is None:
+        runs = all_runs
+        dataset_warning = (
+            f"El run '{run_id}' no tiene dataset_path registrado: se comparan todos "
+            "los runs. Las métricas pueden no ser comparables entre datasets distintos."
+        )
+    else:
+        runs = [r for r in all_runs if _same_dataset(r.get("dataset_path"), dataset_path)]
+
     lower_is_better = {"rmse", "mae", "mape_pct"}
     default_metrics = {
         "classification": "f1_weighted",
         "regression":     "r2",
-        "timeseries":     "rmse",
     }
     metric = primary_metric or default_metrics[task]
 
@@ -392,7 +365,9 @@ def compare_models(
 
     return {
         "status": "ok",
-        "total_runs": len(runs),
+        "dataset_path": dataset_path,
+        "total_runs_for_dataset": len(runs),
+        "total_runs_all": len(all_runs),
         "primary_metric": metric,
         "lower_is_better": metric in lower_is_better,
         "best_run": {
@@ -402,6 +377,7 @@ def compare_models(
             f"test_{metric}": best["test_metrics"].get(metric),
         } if best else None,
         "overfit_warning": overfit_warning,
+        "dataset_warning": dataset_warning,
         "ranking": ranked,
         "recommendation": (
             f"Mejor modelo: '{best['model_alias']}' (run {best['run_id']}) "
@@ -471,7 +447,7 @@ def save_best_model(
 @mcp.tool()
 def generate_report(
     task: Annotated[
-        Literal["classification", "regression", "timeseries"],
+        Literal["classification", "regression"],
         Field(description="Tipo de tarea ML.")
     ],
     best_run_id: Annotated[str, Field(description="run_id del mejor modelo seleccionado.")],
@@ -496,6 +472,14 @@ def generate_report(
     overfit_warning: Annotated[
         Optional[str],
         Field(description="Aviso de overfitting detectado por compare_models, si existe.")
+    ] = None,
+    ranking: Annotated[
+        Optional[list[dict[str, Any]]],
+        Field(description=(
+            "Lista de runs del ranking devuelta por compare_models. "
+            "Si se pasa y contiene más de un run, se genera la tabla comparativa en el reporte. "
+            "Cada entrada debe tener run_id, model_alias y test_metrics."
+        ))
     ] = None,
     agent_notes: Annotated[
         Optional[str],
@@ -583,17 +567,18 @@ def generate_report(
     if agent_notes:
         lines += ["## Notas del agente", "", agent_notes, ""]
 
-    # ── Todos los runs del experimento ────────────────────────────────────
-    all_runs = _load_all_runs()
-    if len(all_runs) > 1:
-        lines += ["## Comparativa de runs", ""]
-        lines += ["| Run ID | Modelo | " + " | ".join(metrics.keys()) + " |",
-                  "|--------|--------|" + "--------|" * len(metrics)]
-        for run in all_runs:
+    # ── Comparativa de runs del mismo dataset ────────────────────────────
+    if ranking and len(ranking) > 1:
+        dataset_label = f" (dataset: `{dataset_path}`)" if dataset_path else ""
+        lines += [f"## Comparativa de runs{dataset_label}", ""]
+        metric_keys = list(ranking[0].get("test_metrics", metrics).keys())
+        lines += ["| Run ID | Modelo | " + " | ".join(metric_keys) + " |",
+                  "|--------|--------|" + "--------|" * len(metric_keys)]
+        for run in ranking:
             tm = run.get("test_metrics", {})
             vals = " | ".join(
                 f"{tm.get(k, 'N/A'):.4f}" if isinstance(tm.get(k), float) else str(tm.get(k, "N/A"))
-                for k in metrics.keys()
+                for k in metric_keys
             )
             marker = " ✅" if run["run_id"] == best_run_id else ""
             lines.append(f"| `{run['run_id']}`{marker} | {run.get('model_alias', '?')} | {vals} |")

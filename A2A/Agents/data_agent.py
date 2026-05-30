@@ -65,6 +65,10 @@ No preguntes al usuario: decide tú cuál es el target.
 Llama a detect_problems pasando la ruta y el target identificado.
 - Si hay problemas CRITICAL: detén el pipeline inmediatamente y reporta
   los problemas encontrados. No continúes con los siguientes pasos.
+- Si detect_problems devuelve problemas CRITICAL relacionados con missing values
+  o alta cardinalidad, evalúa si el problema es resoluble eliminando esa columna
+  antes de detener el pipeline. Solo detén el pipeline si can_train=False Y no
+  existe una solución obvia de preprocesamiento.
 - Si hay problemas WARNING o INFO: anótalos, continúa el pipeline
   e inclúyelos en el reporte final.
 
@@ -72,7 +76,7 @@ Llama a detect_problems pasando la ruta y el target identificado.
 Llama a describe_dataset con la ruta, el target y method="pearson".
 Este paso genera el EDA completo que el ML Agent necesita para decidir
 el modelo adecuado. Presta especial atención a:
-  - Tipo de tarea inferida (clasificación / regresión / series temporales)
+  - Tipo de tarea inferida (clasificación / regresión)
   - Balance de clases si es clasificación
   - Distribuciones y correlaciones de features numéricas
   - Columnas categóricas con alta cardinalidad
@@ -92,7 +96,7 @@ Guarda el resultado en la carpeta outputs/<nombre identificativo del dataset> co
 ### Paso 5 — split_dataset
 Llama a split_dataset sobre el dataset procesado:
   - test_size: 0.2 por defecto
-  - stratify: True si es clasificación, False si es regresión o series temporales
+  - stratify: True si es clasificación, False si es regresión
   - random_state: 42 siempre
   - output_format: "csv"
 Guarda los splits en una subcarpeta "splits/<nombre identificativo del dataset>" junto al dataset.
@@ -107,7 +111,7 @@ en texto con el siguiente formato EXACTO (el ML Agent lo leerá directamente):
 
 **Dataset:** <ruta original>
 **Target:** <nombre de la columna target>
-**Task type:** <classification | regression | timeseries>
+**Task type:** <classification | regression>
 **Train path:** <ruta al train.csv>
 **Test path:** <ruta al test.csv>
 **Shape after processing:** <filas> rows x <columnas> cols

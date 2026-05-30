@@ -200,7 +200,7 @@ async def run_pipeline(dataset_path: str) -> str:
 # Entrypoint
 # ─────────────────────────────────────────────────────────
 
-async def main(dataset_path: Optional[str], serve_only: bool):
+async def main(dataset_path: Optional[str]):
 
     path = Path(dataset_path)
     if not path.exists():
@@ -230,14 +230,7 @@ async def main(dataset_path: Optional[str], serve_only: bool):
 
     logger.info("Todos los agentes están listos.\n")
 
-    if serve_only:
-        logger.info("Modo serve-only. Agentes corriendo. Ctrl+C para detener.")
-        try:
-            while True:
-                await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            pass
-    elif dataset_path:
+    if dataset_path:
         try:
             result = await run_pipeline(dataset_path)
             print("\n" + "=" * 60)
@@ -284,12 +277,7 @@ if __name__ == "__main__":
         type=str,
         help="Ruta al dataset a procesar. Si no se indica, modo interactivo.",
     )
-    parser.add_argument(
-        "--serve-only",
-        action="store_true",
-        help="Arranca los agentes sin ejecutar ningún pipeline.",
-    )
     args = parser.parse_args()
 
     multiprocessing.set_start_method("spawn", force=True)
-    asyncio.run(main(dataset_path=args.dataset, serve_only=args.serve_only))
+    asyncio.run(main(dataset_path=args.dataset))

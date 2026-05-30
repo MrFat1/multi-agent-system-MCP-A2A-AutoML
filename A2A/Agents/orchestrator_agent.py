@@ -1,16 +1,16 @@
 """
 Orchestrator Agent
 ==================
-Coordina el pipeline ML completo delegando tareas a los agentes especializados
-via protocolo A2A. No llama a ningún MCP Server directamente.
+Orquestador LLM del pipeline ML automatizado.
+Usa Google ADK con RemoteA2aAgent para coordinar los 3 agentes especializados
+via protocolo A2A. El razonamiento y la coordinación los ejecuta un LLM Gemini.
 
-Flujo:
+Flujo delegado al LLM:
   1. Recibe dataset_path del usuario
-  2. Delega al Data Agent → obtiene reporte EDA + rutas train/test
-  3. Delega al ML Agent   → obtiene run_id + model_path + métricas
-  4. Delega al Eval Agent → obtiene report_path + production_path
-  5. Si métricas insuficientes → retry al ML Agent (max MAX_RETRIES)
-  6. Devuelve resultado final al usuario
+  2. Llama a data_agent  → reporte EDA + rutas train/test
+  3. Llama a ml_agent    → run_id + model_path + métricas
+  4. Llama a eval_agent  → report_path + production_path
+  5. Devuelve resumen final al usuario
 
 Puertos por defecto:
   Orchestrator : 8000
@@ -21,79 +21,108 @@ Puertos por defecto:
 
 from __future__ import annotations
 
-import uuid
+import json
 from typing import Any
 
-import httpx
+from google.adk.agents import Agent
+from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.adk.tools.agent_tool import AgentTool
+from google.genai import types as genai_types
+from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentSkill,
-    Message,
-    Part,
-    Role,
-    TextPart,
     TransportProtocol,
 )
 
 from A2A.A2AServer import A2AServer
+from utils.logger import get_logger, get_agent_logger
 
-from utils.logger import get_logger
+from dotenv import load_dotenv
+load_dotenv()
+
 logger = get_logger(__name__)
+agent_logger = get_agent_logger()
 
-# ─────────────────────────────────────────────────────────
-# Configuración de agentes conocidos
-# ─────────────────────────────────────────────────────────
+GEMINI_MODEL = "gemini-2.5-flash"
 
-# URLs donde el orquestador buscará agentes al arrancar.
-# Solo este listado necesita actualizarse si se añaden nuevos agentes.
-KNOWN_AGENT_URLS: list[str] = [
-    "http://localhost:8001",
-    "http://localhost:8002",
-    "http://localhost:8003",
-]
+ORCHESTRATOR_INSTRUCTION = """
+Eres el orquestador de un pipeline de Machine Learning automatizado.
+Tienes acceso a tres agentes especializados como herramientas: data_agent, ml_agent y eval_agent.
+Tu trabajo es coordinarlos en orden para completar el pipeline.
 
-# Orden explícito del pipeline. Debe coincidir con los skill.id
-# declarados en las Agent Cards de cada sub-agente.
-PIPELINE_SKILLS: list[str] = [
-    "data_preparation",
-    "model_training",
-    "model_evaluation",
-]
+## Flujo OBLIGATORIO — sigue siempre este orden:
 
-MAX_RETRIES = 2        # intentos máximos de reentrenamiento si métricas son insuficientes
-HTTP_TIMEOUT = 300.0   # segundos — los agentes pueden tardar en entrenar
-ERROR_PREFIX = "AGENT_ERROR:"
+### Paso 1 — data_agent
+Llama a data_agent pasándole exactamente la ruta del dataset recibida.
+Espera su reporte completo antes de continuar.
+Si el reporte contiene "can_train: false" o un error crítico de archivo no encontrado,
+detén el pipeline inmediatamente y comunica el error al usuario con claridad.
 
-class AgentCallError(Exception):
-    """Error al llamar a un agente especializado."""
-    def __init__(self, agent_name: str, reason: str):
-        self.agent_name = agent_name
-        self.reason     = reason
-        super().__init__(f"{agent_name}: {reason}")
+### Paso 2 — ml_agent
+Pasa el reporte COMPLETO del data_agent al ml_agent como contexto.
+Espera su reporte con modelo entrenado y métricas.
+Si las métricas son claramente insuficientes (F1 < 0.4 en clasificación, o R² < 0 en regresión),
+vuelve a llamar al ml_agent indicándole que pruebe un modelo o configuración diferente.
+Máximo 2 intentos en total.
+
+### Paso 3 — eval_agent
+Pasa los reportes COMPLETOS del data_agent y ml_agent al eval_agent.
+Espera el reporte final con métricas detalladas, ruta del modelo en producción y ruta del reporte Markdown.
+
+### Paso 4 — Reporte final del pipeline
+
+Genera tú mismo un reporte resumido en Markdown con el siguiente formato:
+
+---
+## Pipeline ML — Reporte Final
+
+**Dataset:** <ruta del dataset>
+**Fecha:** <fecha actual>
+
+### Artefactos
+<dónde encontrar el reporte y el modelo.>
+
+### Resumen del pipeline
+- **Datos:** <resumen en 1 frase: filas, columnas, target, problemas detectados si los hubo>
+- **Modelo:** <por qué se eligió este modelo, si hubo HPO, si hubo reintentos y por qué>
+- **Evaluación:** <si el modelo es bueno, advertencias de overfitting si las hay>
+---
+
+No reenvíes el reporte completo del eval_agent. Sintetiza la información más relevante
+de los tres reportes (data, ml, eval) en este formato compacto.
+
+## Reglas estrictas:
+- Sigue siempre el orden: data_agent → ml_agent → eval_agent. Nunca lo alteres.
+- Pasa siempre el output COMPLETO de cada agente al siguiente. No lo resumas ni lo recortes.
+- Si cualquier agente devuelve un error técnico, detén el pipeline e informa al usuario con el nombre del agente que falló y el motivo.
+- Nunca inventes resultados ni métricas. Usa exactamente lo que devuelve cada agente.
+- No llames a ningún agente más de una vez salvo el caso de retry del ml_agent descrito arriba.
+"""
 
 
 class OrchestratorAgent(A2AServer):
     """
-    Orquestador del pipeline ML.
+    Orquestador LLM del pipeline ML.
 
-    Coordina Data Agent → ML Agent → Eval Agent via A2A.
-    Gestiona el loop de retry si las métricas del ML Agent no son suficientes.
+    Usa Google ADK con RemoteA2aAgent para coordinar los 3 agentes especializados.
+    El razonamiento y la orquestación los realiza un LLM Gemini en lugar de
+    lógica Python hardcodeada.
     """
+
+    agent_name = "OrchestratorAgent"
 
     def __init__(self, host: str = "localhost", port: int = 8000):
         super().__init__(host=host, port=port)
-        self._http = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
-        # skill_id -> (agent_name, base_url)
-        self._skill_registry: dict[str, tuple[str, str]] = {}
+        self._runner: Runner | None = None
+        self._session_service = InMemorySessionService()
 
     # ─────────────────────────────────────────────────────
     # Identidad A2AServer
     # ─────────────────────────────────────────────────────
-
-    @property
-    def agent_name(self) -> str:
-        return "OrchestratorAgent"
 
     def build_agent_card(self) -> AgentCard:
         return AgentCard(
@@ -125,261 +154,132 @@ class OrchestratorAgent(A2AServer):
         )
 
     # ─────────────────────────────────────────────────────
-    # process_message — lógica principal del orquestador
+    # Inicialización del runner ADK (lazy)
+    # ─────────────────────────────────────────────────────
+
+    async def _get_runner(self) -> Runner:
+        if self._runner is not None:
+            return self._runner
+
+        logger.info(f"[{self.agent_name}] Inicializando RemoteA2aAgents y Runner ADK...")
+
+        data_agent = RemoteA2aAgent(
+            name="data_agent",
+            description="Prepara el dataset: EDA, limpieza, preprocesado y split. Devuelve un reporte estructurado con rutas train/test, tipo de tarea y recomendaciones para el modelo.",
+            agent_card=f"http://localhost:8001{AGENT_CARD_WELL_KNOWN_PATH}",
+        )
+        ml_agent = RemoteA2aAgent(
+            name="ml_agent",
+            description="Selecciona el modelo ML más apropiado, realiza HPO opcional, entrena y registra el experimento. Devuelve run_id, model_path y métricas.",
+            agent_card=f"http://localhost:8002{AGENT_CARD_WELL_KNOWN_PATH}",
+        )
+        eval_agent = RemoteA2aAgent(
+            name="eval_agent",
+            description="Evalúa el modelo entrenado, compara con runs anteriores, guarda el mejor en producción y genera el reporte Markdown final.",
+            agent_card=f"http://localhost:8003{AGENT_CARD_WELL_KNOWN_PATH}",
+        )
+
+        agent = Agent(
+            model=GEMINI_MODEL,
+            name=self.agent_name,
+            instruction=ORCHESTRATOR_INSTRUCTION,
+            tools=[
+                AgentTool(agent=data_agent),
+                AgentTool(agent=ml_agent),
+                AgentTool(agent=eval_agent),
+            ],
+        )
+
+        self._runner = Runner(
+            agent=agent,
+            app_name=self.agent_name,
+            session_service=self._session_service,
+        )
+
+        logger.info(f"[{self.agent_name}] Runner ADK inicializado.")
+        return self._runner
+
+    # ─────────────────────────────────────────────────────
+    # process_message — loop ReAct ADK
     # ─────────────────────────────────────────────────────
 
     async def process_message(self, message: str, context: dict[str, Any]) -> str:
-        """
-        Punto de entrada del pipeline ML.
+        runner  = await self._get_runner()
+        task_id = context.get("task_id", "default")
 
-        Espera recibir una ruta a un dataset en el mensaje.
-        Coordina los 3 agentes en secuencia y gestiona reintentos.
-        """
-        context_id = context.get("context_id", str(uuid.uuid4()))
-
-        # Descubrimiento lazy: se ejecuta solo una vez por instancia
-        if not self._skill_registry:
-            await self._discover_agents()
-
-        logger.info(f"[{self.agent_name}] Iniciando pipeline para: '{message[:80]}'")
-
-        try:
-
-            # ── Paso 1: Data Agent ─────────────────────────────────────────
-            logger.info(f"[{self.agent_name}] -> Delegando al Data Agent...")
-            data_report = await self._call_agent(
-                skill_id="data_preparation",
-                message=f"Prepara el dataset para el pipeline ML: {message}",
-                context_id=context_id,
-            )
-            logger.info(f"[{self.agent_name}] Data Agent completado.")
-
-            # Verificar si el Data Agent encontró errores críticos
-            if self._contains_critical_error(data_report):
-                return (
-                    f"❌ El pipeline se ha detenido en la fase de datos.\n\n"
-                    f"El Data Agent detectó problemas críticos en el dataset:\n\n"
-                    f"{data_report}"
-                )
-
-            # ── Paso 2: ML Agent (con retry) ────────────────────────────────
-            ml_report = None
-            retry_context = ""
-
-            for attempt in range(1, MAX_RETRIES + 1):
-                logger.info(f"[{self.agent_name}] -> Delegando al ML Agent (intento {attempt}/{MAX_RETRIES})...")
-
-                ml_report = await self._call_agent(
-                    skill_id="model_training",
-                    message=(
-                        f"Entrena el mejor modelo ML posible con los siguientes datos:\n\n"
-                        f"{data_report}{retry_context}"
-                    ),
-                    context_id=context_id,
-                )
-                logger.info(f"[{self.agent_name}] ML Agent intento {attempt} completado.")
-
-                # Verificar si las métricas son aceptables
-                if not self._needs_retry(ml_report) or attempt == MAX_RETRIES:
-                    break
-
-                logger.warning(
-                    f"[{self.agent_name}] Métricas insuficientes en intento {attempt}. "
-                    "Solicitando modelo alternativo..."
-                )
-                retry_context = (
-                    f"\n\n## RETRY CONTEXT (intento {attempt + 1})\n"
-                    f"El intento anterior produjo métricas insuficientes:\n"
-                    f"{ml_report}\n"
-                    f"Por favor, prueba un modelo diferente o ajusta los hiperparámetros."
-                )
-
-            # ── Paso 3: Eval Agent ──────────────────────────────────────────
-
-            logger.info(f"[{self.agent_name}] -> Delegando al Eval Agent...")
-            eval_report = await self._call_agent(
-                skill_id="model_evaluation",
-                message=(
-                    f"Evalúa el modelo entrenado y genera el reporte final.\n\n"
-                    f"## DATA AGENT CONTEXT\n{data_report}\n\n"
-                    f"## ML AGENT CONTEXT\n{ml_report}"
-                ),
-                context_id=context_id,
-            )
-            logger.info(f"[{self.agent_name}] Eval Agent completado.")
-
-            # ── Respuesta final al usuario ───────────────────────────────────
-            return (
-                f"✅ Pipeline ML completado.\n\n"
-                f"{'=' * 60}\n"
-                f"{eval_report}\n"
-                f"{'=' * 60}\n\n"
-                f"**Pipeline summary:**\n"
-                f"- Data preparation: ✓\n"
-                f"- Model training: ✓\n"
-                f"- Evaluation & report: ✓\n"
-            )
-
-        except AgentCallError as e:
-            # Formato que main.py sabe parsear para mostrar el error
-            logger.error(f"[{self.agent_name}] Fallo en {e.agent_name}: {e.reason}")
-            return f"{ERROR_PREFIX}{e.agent_name}|{e.reason}"
- 
-        except Exception as e:
-            logger.error(f"[{self.agent_name}] Error inesperado: {e}", exc_info=True)
-            return f"{ERROR_PREFIX}OrchestratorAgent|Error inesperado: {e}"
-
-    # ─────────────────────────────────────────────────────
-    # Lógica de retry
-    # ─────────────────────────────────────────────────────
-
-    def _needs_retry(self, ml_report: str) -> bool:
-        import re
-        report_lower = ml_report.lower()
- 
-        if "error" in report_lower and "train_model" in report_lower:
-            return True
- 
-        for match in re.findall(r"f1[_\s\w]*:\s*(0\.\d+)", report_lower):
-            if float(match) < 0.4:
-                return True
- 
-        for match in re.findall(r"r2[_\s\w]*:\s*(-?\d+\.\d+)", report_lower):
-            if float(match) < 0.0:
-                return True
- 
-        return False
-
-    def _contains_critical_error(self, data_report: str) -> bool:
-        """Detecta si el Data Agent reportó un error crítico que impide continuar."""
-        """
-        keywords = [
-            "can_train: false", "can_train=false",
-            "detenido", "bloqueado",
-            "archivo no encontrado", "filenotfounderror",
-            "error:", "no encontrado",
-        ]
-        """
-        report_lower = data_report.lower()
-        return "can_train: false" in report_lower or "can_train=false" in report_lower
-
-        #return any(kw in data_report.lower() for kw in keywords)
-
-    # ─────────────────────────────────────────────────────
-    # Comunicación A2A con agentes
-    # ─────────────────────────────────────────────────────
-
-    async def _discover_agents(self) -> None:
-        """
-        Consulta /.well-known/agent.json de cada URL en KNOWN_AGENT_URLS,
-        parsea la Agent Card y registra sus skills en _skill_registry.
-
-        Lanza RuntimeError si alguna skill de PIPELINE_SKILLS no se encuentra.
-        """
-        self._skill_registry = {}
-
-        for base_url in KNOWN_AGENT_URLS:
-            try:
-                resp = await self._http.get(f"{base_url}/.well-known/agent.json")
-                resp.raise_for_status()
-                card = AgentCard.model_validate(resp.json())
-
-                for skill in card.skills:
-                    self._skill_registry[skill.id] = (card.name, base_url)
-                    logger.info(
-                        f"[{self.agent_name}] Skill '{skill.id}' "
-                        f"registrada -> {card.name} ({base_url})"
-                    )
-
-            except Exception as e:
-                logger.warning(
-                    f"[{self.agent_name}] No se pudo leer Agent Card "
-                    f"de {base_url}: {e}"
-                )
-
-        missing = [s for s in PIPELINE_SKILLS if s not in self._skill_registry]
-        if missing:
-            raise RuntimeError(
-                f"Pipeline incompleto. Skills no encontradas en ningún agente: {missing}"
-            )
-
-    async def _call_agent(
-        self,
-        skill_id: str,
-        message: str,
-        context_id: str,
-    ) -> str:
-        """
-        Envía un mensaje a un agente via JSON-RPC A2A y devuelve su respuesta.
-        """
-        entry = self._skill_registry.get(skill_id)
-        if not entry:
-            raise AgentCallError(
-                skill_id,
-                f"Ningún agente registrado para la skill '{skill_id}'"
-            )
-        agent_name, base_url = entry
-        rpc_url = f"{base_url}/rpc"
-        task_id = str(uuid.uuid4())
-
-        a2a_message = Message(
-            messageId=str(uuid.uuid4()),
-            role=Role.user,
-            parts=[Part(root=TextPart(text=message))],
-            contextId=context_id,
-            taskId=task_id,
+        session = await self._session_service.create_session(
+            app_name=self.agent_name,
+            user_id="pipeline",
+            session_id=task_id,
         )
 
-        payload = {
-            "jsonrpc": "2.0",
-            "id": str(uuid.uuid4()),
-            "method": "message/send",
-            "params": {
-                "id": task_id,
-                "contextId": context_id,
-                "message": a2a_message.model_dump(exclude_none=True),
-            },
-        }
+        user_content = genai_types.Content(
+            role="user",
+            parts=[genai_types.Part(text=message)],
+        )
 
-        try:
-            resp = await self._http.post(
-                rpc_url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        final_response = ""
 
-            if "error" in data:
-                raise AgentCallError(agent_name, str(data["error"]))
-            
-            text = self._extract_text(data.get("result", {}))
+        async for event in runner.run_async(
+            user_id="pipeline",
+            session_id=session.id,
+            new_message=user_content,
+        ):
+            if event.content and event.content.parts:
+                for part in event.content.parts:
 
-            if text.startswith("Error procesando la tarea"):
-                raise AgentCallError(agent_name, text)
-            
-            return text
+                    if hasattr(part, "function_call") and part.function_call:
+                        fc = part.function_call
+                        agent_logger.info(
+                            f"AGENT: {self.agent_name}\n"
+                            f"TOOL CALL: {fc.name}\n"
+                            f"PARAMS:\n{json.dumps(dict(fc.args), indent=2, ensure_ascii=False, default=str)}"
+                        )
 
-        except httpx.TimeoutException:
-            raise AgentCallError(agent_name, f"Timeout tras {HTTP_TIMEOUT}s sin respuesta.")
-        except httpx.HTTPStatusError as e:
-            raise AgentCallError(agent_name, f"HTTP {e.response.status_code}")
-        except AgentCallError:
-            raise
-        except Exception as e:
-            raise AgentCallError(agent_name, str(e))
+                    elif hasattr(part, "function_response") and part.function_response:
+                        fr = part.function_response
+                        response_str = json.dumps(
+                            fr.response, indent=2, ensure_ascii=False, default=str
+                        ) if isinstance(fr.response, dict) else str(fr.response)
 
-    @staticmethod
-    def _extract_text(result: dict[str, Any]) -> str:
-        """Extrae el texto plano de una respuesta A2A."""
-        for part in result.get("parts", []):
-            text = part.get("text") or part.get("root", {}).get("text")
-            if text:
-                return text
-        return str(result)
+                        try:
+                            parsed = json.loads(response_str)
+                            pretty_response = json.dumps(parsed, indent=2, ensure_ascii=False)
+                        except Exception:
+                            pretty_response = response_str
 
-    async def close(self):
-        await self._http.aclose()
+                        agent_logger.info(
+                            f"AGENT: {self.agent_name}\n"
+                            f"TOOL RESPONSE: {fr.name}\n"
+                            f"RESULT:\n{pretty_response}"
+                        )
+
+            if event.is_final_response():
+                if event.content and event.content.parts:
+                    final_response = "".join(
+                        part.text
+                        for part in event.content.parts
+                        if hasattr(part, "text") and part.text
+                    )
+
+                try:
+                    parsed = json.loads(final_response)
+                    pretty_response = json.dumps(parsed, indent=2, ensure_ascii=False)
+                except Exception:
+                    pretty_response = final_response
+                agent_logger.info(
+                    f"AGENT: {self.agent_name}\n"
+                    f"INPUT:\n{message[:500]}{'...' if len(message) > 500 else ''}\n"
+                    f"FINAL RESPONSE:\n{pretty_response}"
+                )
+                break
+
+        if not final_response:
+            logger.warning(f"[{self.agent_name}] No se obtuvo respuesta final del runner.")
+            final_response = "El agente no produjo respuesta. Revisa los logs del runner ADK."
+
+        logger.info(f"[{self.agent_name}] Respuesta generada ({len(final_response)} chars).")
+        return final_response
 
 
 if __name__ == "__main__":

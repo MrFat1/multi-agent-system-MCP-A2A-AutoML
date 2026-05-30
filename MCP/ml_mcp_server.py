@@ -19,8 +19,6 @@ Modelos soportados (alias → clase):
     - logistic_regression  → LogisticRegression
     - random_forest        → RandomForestClassifier / RandomForestRegressor
     - xgboost              → XGBClassifier/XGBRegressor
-  Series temporales:
-    - sarima               → SARIMAX (statsmodels, interfaz propia, no sklearn)
 
 Uso:
     python -m mcp run ml_mcp_server.py
@@ -110,10 +108,6 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "regression": XGBRegressor,
         "default_params": {"n_estimators": 100, "random_state": 42, "verbosity": 0},
     },
-    "sarima": {
-        "timeseries": True,
-        "default_params": {"order": (1, 1, 1), "seasonal_order": (0, 0, 0, 0)},
-    },
 }
 
 # Espacios de búsqueda para HPO por alias
@@ -141,7 +135,6 @@ HPO_SEARCH_SPACES: dict[str, dict[str, Any]] = {
         "model__colsample_bytree": [0.8, 1.0],
         "model__min_child_weight": [1, 3, 5],
     },
-    "sarima": {},  # SARIMA no usa sklearn HPO
 }
 
 
@@ -264,25 +257,14 @@ def _save_experiment(run: dict) -> Path:
 def _verdict(test_metrics: dict, task: str) -> dict:
     if task == "classification":
         metric, val = "f1_weighted", test_metrics.get("f1_weighted", 0)
-        thresholds = {"good": 0.85, "acceptable": 0.70}
-    elif task == "regression":
+    else:  # regression
         metric, val = "r2", test_metrics.get("r2", 0)
-        thresholds = {"good": 0.85, "acceptable": 0.70}
-    else:  # timeseries
-        metric, val = "rmse", test_metrics.get("rmse", float("inf"))
-        # Para rmse lower is better, invertimos lógica
-        thresholds = {"good": 0.10, "acceptable": 0.20}
-        status = "good" if val < thresholds["good"] else "acceptable" if val < thresholds["acceptable"] else "poor"
-        return {"metric": metric, "value": val, "status": status}
-
+    thresholds = {"good": 0.85, "acceptable": 0.70}
     status = "good" if val >= thresholds["good"] else "acceptable" if val >= thresholds["acceptable"] else "poor"
     return {"metric": metric, "value": val, "status": status}
 
 def _overfit_check(train_metrics: dict, test_metrics: dict, task: str) -> dict:
-    if task in ("classification",):
-        metric = "f1_weighted"
-    else:
-        metric = "r2" if task == "regression" else "rmse"
+    metric = "f1_weighted" if task == "classification" else "r2"
 
     train_val = train_metrics.get(metric, 0)
     test_val  = test_metrics.get(metric, 0)
@@ -318,11 +300,11 @@ def train_model(
     test_path: Annotated[str, Field(description="Ruta al archivo test (CSV o Parquet).")],
     target_column: Annotated[str, Field(description="Nombre de la columna objetivo.")],
     model_alias: Annotated[
-        Literal["logistic_regression", "linear_regression", "random_forest", "xgboost", "sarima"],
+        Literal["logistic_regression", "linear_regression", "random_forest", "xgboost"],
         Field(description="Alias del modelo a entrenar.")
     ],
     task: Annotated[
-        Literal["classification", "regression", "timeseries"],
+        Literal["classification", "regression"],
         Field(description="Tipo de tarea ML.")
     ],
     hyperparams: Annotated[
@@ -332,10 +314,6 @@ def train_model(
     experiment_name: Annotated[
         Optional[str],
         Field(description="Nombre descriptivo del experimento. Opcional.")
-    ] = None,
-    date_column: Annotated[
-        Optional[str],
-        Field(description="Para SARIMA: nombre de la columna de fechas (opcional, se usará como índice temporal).")
     ] = None,
     output_dir: Annotated[
         str,
@@ -355,62 +333,6 @@ def train_model(
     MODELS_DIR_ = Path(output_dir)
     MODELS_DIR_.mkdir(parents=True, exist_ok=True)
     run_id = str(uuid.uuid4())[:8]
-
-    # ── SARIMA (serie temporal) ───────────────────────────────────────────
-    if task == "timeseries" or model_alias == "sarima":
-        try:
-            from statsmodels.tsa.statespace.sarimax import SARIMAX
-        except ImportError:
-            raise ImportError("statsmodels no está instalado. Ejecuta: pip install statsmodels")
-
-        df_train = pd.read_csv(train_path) if train_path.endswith(".csv") else pd.read_parquet(train_path)
-        df_test  = pd.read_csv(test_path)  if test_path.endswith(".csv")  else pd.read_parquet(test_path)
-
-        if target_column not in df_train.columns:
-            raise ValueError(f"Columna target '{target_column}' no encontrada.")
-
-        if date_column:
-            df_train[date_column] = pd.to_datetime(df_train[date_column])
-            df_test[date_column]  = pd.to_datetime(df_test[date_column])
-            df_train = df_train.set_index(date_column)
-            df_test  = df_test.set_index(date_column)
-
-        y_train = df_train[target_column].astype(float)
-        y_test  = df_test[target_column].astype(float)
-
-        defaults = MODEL_REGISTRY["sarima"]["default_params"].copy()
-        defaults.update(hyperparams)
-
-        order          = tuple(defaults.get("order", (1, 1, 1)))
-        seasonal_order = tuple(defaults.get("seasonal_order", (0, 0, 0, 0)))
-
-        fitted = SARIMAX(y_train, order=order, seasonal_order=seasonal_order).fit(disp=False)
-
-        train_pred = fitted.fittedvalues
-        y_pred     = fitted.forecast(steps=len(y_test)).values
-
-        train_metrics = _compute_regression_metrics(y_train, train_pred.values)
-        test_metrics  = _compute_regression_metrics(y_test, y_pred)
-
-        model_path = MODELS_DIR_ / f"sarima_{run_id}.pkl"
-        joblib.dump(fitted, model_path)
-
-        verdict = _verdict(test_metrics, "timeseries")
-        overfit = _overfit_check(train_metrics, test_metrics, "timeseries")
-
-        return {
-            "run_id": run_id,
-            "model_alias": "sarima",
-            "task": "timeseries",
-            "hyperparams_used": {"order": order, "seasonal_order": seasonal_order},
-            "train_metrics": train_metrics,
-            "test_metrics": test_metrics,
-            "model_path": str(model_path),
-            "experiment_name": experiment_name or f"sarima_{run_id}",
-            "verdict": verdict,
-            "overfit_check": overfit,
-            "recommendation": _recommendation(verdict, overfit, "sarima"),
-        }
 
     # ── Sklearn (clasificación / regresión) ───────────────────────────────
     X_train, y_train, X_test, y_test = _load_splits(train_path, test_path, target_column)
@@ -458,6 +380,7 @@ def train_model(
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,
         "model_path": str(model_path),
+        "dataset_path": str(Path(train_path).parent),
         "experiment_name": experiment_name or f"{model_alias}_{run_id}",
         "label_encoder_classes": le.classes_.tolist() if le else None,
         "verdict": verdict,
@@ -515,12 +438,6 @@ def tune_hyperparams(
 
     Prophet no está soportado aquí ya que su HPO requiere un enfoque diferente.
     """
-    if model_alias == "sarima":
-        return {
-            "error": "SARIMA no soporta HPO con RandomizedSearchCV. "
-                     "Pasa order y seasonal_order directamente a train_model."
-        }
-
     X_train, y_train, _, _ = _load_splits(
         train_path,
         train_path,  # no necesitamos test para HPO
@@ -588,7 +505,7 @@ def tune_hyperparams(
 def log_run(
     run_id: Annotated[str, Field(description="ID del run devuelto por train_model.")],
     model_alias: Annotated[str, Field(description="Alias del modelo entrenado.")],
-    task: Annotated[str, Field(description="Tipo de tarea (classification/regression/timeseries).")],
+    task: Annotated[str, Field(description="Tipo de tarea (classification/regression).")],
     hyperparams: Annotated[dict[str, Any], Field(description="Hiperparámetros usados en el entrenamiento.")],
     train_metrics: Annotated[dict[str, float], Field(description="Métricas sobre el train set.")],
     test_metrics: Annotated[dict[str, float], Field(description="Métricas sobre el test set.")],

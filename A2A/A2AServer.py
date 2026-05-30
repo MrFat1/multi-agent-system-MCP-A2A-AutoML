@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import uvicorn
-from a2a.utils.constants import PREV_AGENT_CARD_WELL_KNOWN_PATH, DEFAULT_RPC_URL
+from a2a.utils.constants import PREV_AGENT_CARD_WELL_KNOWN_PATH, AGENT_CARD_WELL_KNOWN_PATH, DEFAULT_RPC_URL
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.types import (
     AgentCard,
@@ -93,6 +93,10 @@ class A2AServer(ABC):
         """Registra los endpoints estándar"""
 
         @self.app.get(PREV_AGENT_CARD_WELL_KNOWN_PATH)
+        async def get_agent_card_legacy():
+            return self.build_agent_card().model_dump(exclude_none=True)
+
+        @self.app.get(AGENT_CARD_WELL_KNOWN_PATH)
         async def get_agent_card():
             """Endpoint de descubrimiento: devuelve el AgentCard del agente"""
             return self.build_agent_card().model_dump(exclude_none=True)
@@ -101,8 +105,7 @@ class A2AServer(ABC):
         async def health_check():
             return {"status": "ok", "agent": self.agent_name}
 
-        @self.app.post(DEFAULT_RPC_URL)
-        async def handle_jsonrpc(request: Request):
+        async def _dispatch_jsonrpc(request: Request):
             """Punto de entrada principal: despacha métodos JSON-RPC A2A."""
             body = await request.json()
             method = body.get("method", "")
@@ -122,13 +125,13 @@ class A2AServer(ABC):
                         "id": req_id,
                         "error": {"code": -32601, "message": f"Método no encontrado: {method}"},
                     })
-                
+
                 return JSONResponse(content={
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": result,
                 })
-            
+
             except Exception as e:
                 logger.error(f"[{self.agent_name}] Error en {method}: {e}", exc_info=True)
                 return JSONResponse(status_code=500, content={
@@ -137,6 +140,10 @@ class A2AServer(ABC):
                     "error": {"code": -32603, "message": str(e)},
                 })
 
+        # Register at both paths: /rpc (legacy) and / (a2a SDK A2AClient default)
+        self.app.post(DEFAULT_RPC_URL)(_dispatch_jsonrpc)
+        self.app.post("/")(_dispatch_jsonrpc)
+
     # Handlers
     async def _handle_task_send(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -144,8 +151,8 @@ class A2AServer(ABC):
         """
 
         task_id = params.get("id", str(uuid.uuid4()))
-        context_id = params.get("contextId") or message_data.get("contextId") or str(uuid.uuid4())
         message_data = params.get("message", {})
+        context_id = params.get("contextId") or message_data.get("contextId") or str(uuid.uuid4())
 
         # Extraer texto del mensaje
         user_text = self._extract_text(message_data)
