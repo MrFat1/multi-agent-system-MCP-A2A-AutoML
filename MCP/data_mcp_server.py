@@ -10,8 +10,8 @@ un resultado serializable (dict/JSON). El estado lo gestiona el agente orquestad
 Fuentes soportadas: CSV, Parquet, JSON, Excel (.xlsx/.xls), Feather, ORC.
 
 Uso:
-    fastmcp run data_mcp_server.py
-    fastmcp dev data_mcp_server.py   # con inspector MCP
+    python  MCP/data_mcp_server.py
+    mcp dev MCP/data_mcp_server.py   # con inspector MCP
 """
 
 from __future__ import annotations

@@ -12,7 +12,8 @@ Responsabilidades:
 Diseño: stateless — cada tool recibe rutas y parámetros explícitos.
 
 Uso:
-    python -m mcp run eval_mcp_server.py
+    python  MCP/eval_mcp_server.py
+    mcp dev MCP/eval_mcp_server.py   # con inspector MCP
 """
 
 from __future__ import annotations

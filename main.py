@@ -240,7 +240,7 @@ async def main(dataset_path: Optional[str]):
             print("=" * 60)
         except PipelineError as e:
             print("\n" + "=" * 60)
-            print("❌ PIPELINE INTERRUMPIDO")
+            print("PIPELINE INTERRUMPIDO")
             print("=" * 60)
             print(f"Agente:  {e.agent}")
             print(f"Motivo:  {e.message}")
@@ -254,7 +254,7 @@ async def main(dataset_path: Optional[str]):
         logger.info("Modo interactivo. Escribe la ruta al dataset o 'exit' para salir.")
         while True:
             try:
-                user_input = input("\n📂 Dataset path: ").strip()
+                user_input = input("\nDataset path: ").strip()
                 if user_input.lower() in ("exit", "quit", "q"):
                     break
                 if not user_input:

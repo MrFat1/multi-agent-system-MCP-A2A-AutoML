@@ -21,7 +21,8 @@ Modelos soportados (alias → clase):
     - xgboost              → XGBClassifier/XGBRegressor
 
 Uso:
-    python -m mcp run ml_mcp_server.py
+    python  MCP/ml_mcp_server.py
+    mcp dev MCP/ml_mcp_server.py   # con inspector MCP
 """
 
 from __future__ import annotations

@@ -52,7 +52,7 @@ class Logger:
     
 _loggers: dict = {}  # cache para evitar duplicados
 
-def get_logger(name: str, log_file: str = "outputs/logs/ml_pipeline.log") -> logging.Logger:
+def get_logger(name: str, log_file: str = "outputs/logs/debug_connection.log") -> logging.Logger:
     """
     Devuelve un logger configurado. Si ya existe uno con ese nombre, lo reutiliza.
     Crea el directorio de logs si no existe.
@@ -65,11 +65,9 @@ def get_logger(name: str, log_file: str = "outputs/logs/ml_pipeline.log") -> log
     _loggers[name] = logger
     return logger
 
-def get_agent_logger(log_file: str = "outputs/logs/agents_v3.log") -> logging.Logger:
+def get_agent_logger(log_file: str = "outputs/logs/agent_workflow.log") -> logging.Logger:
     """
     Logger dedicado a las respuestas y razonamientos de los agentes.
-    Escribe en agents.log (además de consola) para separar la traza
-    del LLM de los logs de infraestructura.
     """
     if AGENT_LOGGER_NAME in _loggers:
         return _loggers[AGENT_LOGGER_NAME]
