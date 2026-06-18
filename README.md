@@ -97,20 +97,6 @@ Multi-Agent_System_MCP-A2A_AutoML/
 
 ---
 
-## Output Artifacts
-
-| Artifact | Location |
-|---|---|
-| Train/test splits | `splits/<dataset_name>/train.csv`, `test.csv` |
-| Trained models | `models/<run_id>.pkl` |
-| Best model (production) | `models/production/<run_id>.pkl` |
-| Experiment logs | `experiments/<run_id>.json` |
-| Final report | `reports/report_<run_id>_<timestamp>.md` |
-| Agent reasoning log | `outputs/logs/agents_v3.log` |
-| Infrastructure log | `outputs/logs/ml_pipeline.log` |
-
----
-
 ## Prerequisites
 
 - Python >= 3.11
